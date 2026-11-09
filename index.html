@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Park Hutan Kota UNESA</title>
+    
+    <!-- Load MediaPipe Pose & Camera Utils dari CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #121212;
+            color: white;
+            text-align: center;
+            margin: 0;
+            padding: 15px;
+        }
+        h2 {
+            font-size: 1.2rem;
+            color: #4CAF50;
+            margin-bottom: 15px;
+        }
+        .video-container {
+            position: relative;
+            width: 100%;
+            max-width: 450px;
+            margin: 0 auto;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.6);
+        }
+        video, canvas {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+        #output-panel {
+            background: #1e1e1e;
+            padding: 15px;
+            margin: 15px auto;
+            max-width: 450px;
+            border-radius: 8px;
+            text-align: left;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+        }
+        .info-text {
+            font-size: 0.95rem;
+            margin: 6px 0;
+        }
+        #status-kirim {
+            font-size: 0.85rem;
+            color: #ffeb3b;
+            margin-top: 10px;
+            font-style: italic;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>Hutan Kota UNESA - Smart Monitoring</h2>
+    
+    <!-- Jendela Kamera & Canvas Canvas AI -->
+    <div class="video-container">
+        <video id="input_video" autoplay playsinline muted style="display:none;"></video>
+        <canvas id="output_canvas"></canvas>
+    </div>
+
+    <!-- Informasi Real-Time -->
+    <div id="output-panel">
+        <p class="info-text"><b>Lokasi Titik:</b> <span id="txt-lokasi">Zona Gazebo / Workspace</span></p>
+        <p class="info-text"><b>Aktivitas Terdeteksi:</b> <span id="txt-aktivitas" style="color: yellow;">Memuat Kamera & AI...</span></p>
+        <p class="info-text"><b>Total Pengunjung Valid:</b> <span id="txt-pengunjung" style="color: #4CAF50;">0</span></p>
+        <p id="status-kirim">Status Database: Menunggu sinkronisasi pertama...</p>
+    </div>
+
+    <script>
+        // =========================================================================
+        // MASUKKAN URL WEB APP GOOGLE APPS SCRIPT DARI LANGKAH SEBELUMNYA DI SINI
+        // =========================================================================
+        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbwDC3Ou2Vv5i_GYjzbJ6Wz-Dxng4UAluKYfDQKQZjUgLwWJJGcGmHvhM3IV_wFQhNJy/exec";
+
+        const videoElement = document.getElementById('input_video');
+        const canvasElement = document.getElementById('output_canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+
+        const txtAktivitas = document.getElementById('txt-aktivitas');
+        const txtPengunjung = document.getElementById('txt-pengunjung');
+        const statusKirim = document.getElementById('status-kirim');
+
+        let lastDataKirim = { pengunjung: 0, aktivitas: "Area Kosong" };
+
+        function onResults(results) {
+            canvasElement.width = videoElement.videoWidth;
+            canvasElement.height = videoElement.videoHeight;
+
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            
+            // Tampilkan frame kamera
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            let pengunjungValid = 0;
+            let aktivitas = "Area Kosong / Diabaikan";
+
+            if (results.poseLandmarks) {
+                const landmarks = results.poseLandmarks;
+                
+                // --- FILTER HEWAN & OBJEK BUKAN MANUSIA ---
+                // Cek visibilitas bahu manusia (Landmark 11 & 12)
+                const leftShoulder = landmarks[11];
+                const rightShoulder = landmarks[12];
+
+                if (leftShoulder.visibility > 0.6 && rightShoulder.visibility > 0.6) {
+                    pengunjungValid = 1;
+
+                    // --- DETEKSI AKTIVITAS GENERAL ---
+                    const leftHip = landmarks[23];
+                    const leftKnee = landmarks[25];
+                    const leftAnkle = landmarks[27];
+
+                    const hipKneeDiff = Math.abs(leftHip.y - leftKnee.y);
+
+                    if (hipKneeDiff < 0.18) {
+                        aktivitas = "Duduk / Belajar (Workspace / Gazebo)";
+                    } else if ((leftAnkle.y - leftHip.y) > 0.55) {
+                        aktivitas = "Berdiri / Mengamati (Kandang Rusa/Merak)";
+                    } else {
+                        aktivitas = "Berjalan / Berolahraga";
+                    }
+
+                    // Gambar garis skeleton MediaPipe di layar
+                    drawConnectors(canvasCtx, landmarks, POSE_CONNECTIONS, {color: '#00FF00', lineWidth: 2});
+                    drawLandmarks(canvasCtx, landmarks, {color: '#FF0000', lineWidth: 1, radius: 3});
+                } else {
+                    aktivitas = "Diabaikan (Bukan Manusia / Hewan Lewat)";
+                }
+            }
+
+            // Update Teks Informasi Real-time di UI Web
+            txtAktivitas.innerText = aktivitas;
+            txtPengunjung.innerText = pengunjungValid;
+
+            // Simpan data terbaru
+            lastDataKirim = { pengunjung: pengunjungValid, aktivitas: aktivitas };
+
+            canvasCtx.restore();
+        }
+
+        // Inisialisasi Model MediaPipe Pose
+        const pose = new Pose({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`
+        });
+
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            minDetectionConfidence: 0.6,
+            minTrackingConfidence: 0.6
+        });
+
+        pose.onResults(onResults);
+
+        // Akses Kamera Belakang HP (facingMode: "environment")
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await pose.send({image: videoElement});
+            },
+            facingMode: "environment", 
+            width: 640,
+            height: 480
+        });
+
+        camera.start();
+
+        // --- PENGIRIMAN DATA KE GOOGLE SHEETS SETIAP 10 DETIK ---
+        setInterval(() => {
+            if (!WEB_APP_URL || WEB_APP_URL.includes("URL_GOOGLE_APPS")) {
+                statusKirim.innerText = "Error: URL Web App Google Sheets belum dikonfigurasi!";
+                return;
+            }
+
+            statusKirim.innerText = "Mengirim data ke Google Sheets...";
+            
+            fetch(WEB_APP_URL, {
+                method: "POST",
+                mode: "no-cors",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    lokasi: "Titik Hutan Kota UNESA",
+                    pengunjung: lastDataKirim.pengunjung,
+                    aktivitas: lastDataKirim.aktivitas
+                })
+            })
+            .then(() => {
+                statusKirim.innerText = "Status: Data berhasil dikirim & tersimpan ke Google Sheets!";
+            })
+            .catch((err) => {
+                statusKirim.innerText = "Gagal mengirim data: " + err;
+            });
+
+        }, 10000); // 10000 ms = 10 detik
+    </script>
+
+</body>
+</html>
